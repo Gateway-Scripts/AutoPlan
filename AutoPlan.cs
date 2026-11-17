@@ -25,7 +25,10 @@ namespace AutoPlan
         {
             try
             {
-
+                if (args.Length > 0)
+                {
+                    _patientId = args.First();
+                }
                 using (Application app = Application.CreateApplication())
                 {
                     Execute(app);
@@ -99,20 +102,108 @@ namespace AutoPlan
             ExternalBeamMachineParameters parameters = new ExternalBeamMachineParameters("GS_TrueBeam",
                 "10X",//do not put FFF on the energy mode.
                 600,
-                "STATIC",
+                "ARC",//"STATIC"
                 null);//primary fluence mode can be "FFF"
-            foreach(double gantry in gantryAngles)
+            //foreach(double gantry in gantryAngles)
+            //{
+            //    plan.AddStaticBeam(parameters,
+            //        new VRect<double>(-50, -50, 50, 50),//10x10 field to start.
+            //        0,
+            //        gantry,
+            //        0,
+            //        target.CenterPoint);//isocenter to the center of target (warning shifts may be precise).
+            //    //alternatively for isocenter can use structureSet.Image.UserOrigin if user origin is set.
+            //}
+            //add 2 arcs
+            for(int i = 0; i < 2; i++)
             {
-                plan.AddStaticBeam(parameters,
-                    new VRect<double>(-50, -50, 50, 50),//10x10 field to start.
+                Beam beam = plan.AddConformalArcBeam(parameters,
+                    i % 2 == 0 ? 30 : 330,//if its arc 1, set collimator to 30, for arc 2 set to 330.
+                    20,
+                    i % 2 == 0 ? 195 : 165,//ternary operator
+                    i % 2 == 0 ? 165 : 195,
+                    i % 2 == 0 ? GantryDirection.Clockwise : GantryDirection.CounterClockwise,
                     0,
-                    gantry,
-                    0,
-                    target.CenterPoint);//isocenter to the center of target (warning shifts may be precise).
-                //alternatively for isocenter can use structureSet.Image.UserOrigin if user origin is set.
+                    target.CenterPoint);
+                beam.FitCollimatorToStructure(new FitToStructureMargins(5), target, true, true, false);
+                //check X-jaw size and reduce size if > 150mm.
             }
             Console.WriteLine($"{plan.Beams.Count()} beams added to the plan");
 
+            //allow the user to select a RapidPlan Model.
+            int rpIndex = 0;
+            foreach(var rp in app.Calculation.GetDvhEstimationModelSummaries())//.Where(r=>r.IsPublished)//.Where(r=>r.IsTrained)//OrderBy(r=>r.Name)
+            {
+                Console.WriteLine($"[{rpIndex}]. {rp.Name} - {rp.TreatmentSite}");
+                rpIndex++;
+            }
+            Console.WriteLine("Select a RapidPlan Model");
+            int rpSelect = Convert.ToInt32(Console.ReadLine());
+            var rpModel = app.Calculation.GetDvhEstimationModelSummaries().ElementAt(rpSelect);
+
+            Dictionary<string, DoseValue> targetMatches = new Dictionary<string, DoseValue>();
+            Dictionary<string, string> structureMatches = new Dictionary<string, string>();
+
+            var rpModelStructures = app.Calculation.GetDvhEstimationModelStructures(rpModel.ModelUID);
+            //find a match to all plan structures based on the ID.
+            foreach(Structure structure in structureSet.Structures)
+            {
+                if(structure.DicomType == "PTV")
+                {
+                    //add to structure matches and to target matches.
+                    if (rpModelStructures.Any(s => s.Id.Equals(structure.Id, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var rpStructureMatch = rpModelStructures.First(s => s.Id.Equals(structure.Id, StringComparison.OrdinalIgnoreCase));
+                        structureMatches.Add(structure.Id, rpStructureMatch.Id);
+                        targetMatches.Add(structure.Id, plan.TotalDose);                        
+                    }
+                    else
+                    {
+                        //TODO: handle if your PTV does not find a match on ID.
+                        //Perhaps match on rpStructureMatch.StructureType == DVHEstimationStructureType.PTV;
+                    }
+                }
+                else
+                {
+                    //normal structures
+                    if (rpModelStructures.Any(s => s.Id.Equals(structure.Id, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var rpStructureMatch = rpModelStructures.First(s => s.Id.Equals(structure.Id, StringComparison.OrdinalIgnoreCase));
+                        structureMatches.Add(structure.Id, rpStructureMatch.Id);
+                    }
+                }
+            }
+            Console.WriteLine($"Structures matched: \n\t{String.Join("\n\t",structureMatches.Select(s=>$"{s.Key}=>{s.Value}"))}");
+            Console.WriteLine("Calculating DVH Estimates...");
+            plan.CalculateDVHEstimates(rpModel.Name, targetMatches, structureMatches);
+            //add a ring if one does not exist. And Add the normal tissue objective.
+            string ringId = "NS_Ring05";
+            Structure ring;
+            if(structureSet.Structures.Any(st=>st.Id.Equals(ringId, StringComparison.OrdinalIgnoreCase)))
+            {
+                ring = structureSet.Structures.First(st => st.Id.Equals(ringId, StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                ring = structureSet.AddStructure("CONTROL", ringId);
+                ring.SegmentVolume = target.Margin(5).Sub(target);
+            }
+            //to manually add objectives to the optimization.
+            plan.OptimizationSetup.AddPointObjective(ring, 
+                OptimizationObjectiveOperator.Upper,
+                plan.TotalDose * 1.05,
+                0,
+                100);
+            //add the NTO
+            plan.OptimizationSetup.AddAutomaticNormalTissueObjective(100);
+
+            Console.WriteLine("Optimizing...");
+            plan.OptimizationSetup.UseJawTracking = true;
+            plan.OptimizeVMAT(new OptimizationOptionsVMAT(OptimizationIntermediateDoseOption.UseIntermediateDose,
+                plan.Beams.First().MLC.Id));
+            //IMRT only.
+            //Console.WriteLine("Calculating leaf motions...");
+            //plan.CalculateLeafMotions();
             Console.WriteLine("Calculating Dose...");
             plan.CalculateDose();
             //this should always be the last line in a stand-alone automation script.

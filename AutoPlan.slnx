@@ -2,7 +2,7 @@
   <Configurations>
     <Platform Name="x64" />
   </Configurations>
-  <Project Path="AutoPlan.csproj">
+  <Project Path="AutoPlan.csproj" Id="db239352-1d4e-4f8f-84b6-f641bbec4463">
     <Platform Project="x64" />
   </Project>
 </Solution>
